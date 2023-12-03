@@ -5,12 +5,15 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/Ag
 import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 import {Pool} from "./Pool.sol";
 
+//import "../node_modules/hardhat/console.sol";
+
 ///@title Borb Game contract
 ///@notice A contract that allows you to bet stablecoins on an increase or decrease in the price of a selected currency and make a profit.
-contract Borb is AutomationCompatibleInterface {
-    uint256 public constant REWARD_PERCENT_MIN = 20;
-    uint256 public constant REWARD_PERCENT_MAX = 80;
+contract BorbCFD is AutomationCompatibleInterface {
     uint256[] public notClaimed;
+    uint256 public constant REWARD_PERCENT_MIN = 20;
+    uint256 public constant REWARD_PERCENT_MAX = 100;
+
     enum BetType {
         Up,
         Down
@@ -33,11 +36,11 @@ contract Borb is AutomationCompatibleInterface {
         int256 lockPrice;
         uint256 lockTimestamp;
         uint256 amount;
-        uint256 potentialReward;
         address user;
         uint80 roundId; //the round in which the price was fixed
         uint32 timeframe;
         uint8 assetId;
+        uint8 leverage;
         BetType betType;
         Currency currency;
         bool claimed;
@@ -70,9 +73,10 @@ contract Borb is AutomationCompatibleInterface {
     mapping(address => bool) public users;
 
     ///@notice reward percents is different for different currencies, timeframes and assets
-    ///currency-asset-timeframe-percent
-    mapping(Currency => mapping(uint8 => mapping(uint32 => uint256)))
-        public rewardPercent;
+    mapping(Currency => mapping(uint32 => uint256)) public rewardPercent;
+
+    ///@notice assetId from pool, this currency is for bets
+    uint8 public assetId;
 
     ///@notice allowed currencies
     Currency[10] public currencies = [
@@ -103,8 +107,7 @@ contract Borb is AutomationCompatibleInterface {
     ///@param currency number of currency for bet
     ///@param timeframe timeframe in seconds
     ///@param amount amount of bet
-    ///@param potentialReward amount of asset that user take if win
-    ///@param assetId id of asset that player bets
+    ///@param leverage leverage value
     ///@param lockPrice price of currency when user makes bet
     ///@param lockedAt time when bet was made
     event NewBetAdded(
@@ -114,8 +117,7 @@ contract Borb is AutomationCompatibleInterface {
         Currency currency,
         uint32 timeframe,
         uint256 amount,
-        uint256 potentialReward,
-        uint8 assetId,
+        uint8 leverage,
         int256 lockPrice,
         uint256 lockedAt
     );
@@ -125,11 +127,14 @@ contract Borb is AutomationCompatibleInterface {
     ///@param timeframe bet timeframe in seconds
     ///@param betId id of bet
     ///@param closePrice close price at bet closed time
+    ///@param tradeResult result of trade (win or loss, determines by open and close price)
     event BetClaimed(
         address indexed user,
         uint256 indexed timeframe,
         uint256 indexed betId,
-        int256 closePrice
+        int256 closePrice,
+        uint256 tradeResult,
+        bool isWin
     );
 
     error NotAnOwnerError();
@@ -147,6 +152,7 @@ contract Borb is AutomationCompatibleInterface {
     error IncorrectRoundIdError();
     error IncorrectPriceFeedNumber();
     error IncorrectFeeValue();
+    error IncorrectLeverageValue();
     error BettingIsNotAllowedError();
 
     modifier onlyOwner() {
@@ -181,61 +187,69 @@ contract Borb is AutomationCompatibleInterface {
     constructor(
         address[10] memory _priceFeeds,
         address _calculator,
-        address _pool
+        address _pool,
+        string memory _assetName
     ) {
         owner = msg.sender;
-        pool = Pool(_pool);
-        uint256 allowedAssetsCount = pool.allowedAssetsCount();
+
         for (uint256 currencyId = 0; currencyId < 10; currencyId++) {
             priceFeeds[currencies[currencyId]] = AggregatorV3Interface(
                 _priceFeeds[currencyId]
             );
-            for (uint8 i = 0; i < allowedAssetsCount; ) {
-                _initRewardPercent(i, currencies[currencyId]);
-                unchecked {
-                    ++i;
-                }
-            }
         }
 
         calculator = _calculator;
+        pool = Pool(_pool);
         maxBetAmount = 100 * 10 ** 18;
-        minBetAmount = 100;
+        minBetAmount = 10_000;
+        for (uint256 currencyId = 0; currencyId < 10; currencyId++) {
+            _initRewardPercent(currencies[currencyId]);
+        }
+        assetId = pool.getAssetId(_assetName);
     }
 
-    ///@notice initialize refard percent
-    function _initRewardPercent(uint8 _assetId, Currency _currency) private {
+    function _initRewardPercent(Currency _currency) private {
         uint32[] memory timeframes = getAllowedTimeframes();
         uint256 length = timeframes.length;
         for (uint8 i = 0; i < length; ) {
-            rewardPercent[_currency][_assetId][
-                timeframes[i]
-            ] = REWARD_PERCENT_MAX;
+            rewardPercent[_currency][timeframes[i]] = REWARD_PERCENT_MAX;
             unchecked {
                 ++i;
             }
         }
     }
 
-    ///@notice allowing bets
-    function toggleAllowBetting() external onlyOwner {
-        isGameStopped = !isGameStopped;
+    ///@notice fee for win bet
+    uint256 public winFeePercent = 200;
+    ///@notice fee for loose bet
+    uint256 public looseFeePercent = 100;
+
+    ///@notice sets fee for win bet
+    ///@param percent percent of fee 1..100
+    function setWinFeePercent(uint256 percent) public onlyOwner {
+        winFeePercent = percent * 100;
+    }
+
+    ///@notice sets fee for loose bet
+    ///@param percent percent of fee 1..100
+    function setLooseFeePercent(uint256 percent) public onlyOwner {
+        looseFeePercent = percent * 100;
     }
 
     ///@notice Make bet
     ///@param _amount amount of bet in selected asset
     ///@param _ref address of users referer, it sets one time
     ///@param _timeframe bet timeframe in seconds
-    ///@param _assetId id of bet asset
     ///@param _betType type of bet, Up(0) or Down(1)
     ///@param _currency the currency on which a bet is made to rise or fall.
+    ///@param _leverage leverage
     function makeBet(
         uint256 _amount,
         address _ref,
         uint32 _timeframe,
-        uint8 _assetId,
         BetType _betType,
-        Currency _currency
+        Currency _currency,
+        uint8 _leverage
     ) external payable timeframeExsists(_timeframe) {
         if (isGameStopped) {
             revert BettingIsNotAllowedError();
@@ -243,17 +257,19 @@ contract Borb is AutomationCompatibleInterface {
         if (msg.value != calculatorFee) {
             revert IncorrectFeeValue();
         }
+        if (_leverage < 2 || _leverage > 100) {
+            revert IncorrectLeverageValue();
+        }
         if (_amount == 0) return;
-        uint256 potentialReward = getReward(
-            _assetId,
+        uint256 potentialReward = getPotentialReward(
             _currency,
             _timeframe,
             _amount
         );
-        if (!pool.poolBalanceEnough(potentialReward, _assetId)) {
+        if (!pool.poolBalanceEnough(potentialReward, assetId)) {
             revert NotEnoughtPoolBalanceError();
         }
-        if (!pool.userBalanceEnough(msg.sender, _amount, _assetId)) {
+        if (!pool.userBalanceEnough(msg.sender, _amount, assetId)) {
             revert NotEnoughtUserBalanceError();
         }
         if (_amount > maxBetAmount || _amount < minBetAmount) {
@@ -276,17 +292,18 @@ contract Borb is AutomationCompatibleInterface {
                 lockPrice: price,
                 lockTimestamp: block.timestamp,
                 amount: _amount,
-                potentialReward: potentialReward,
                 user: msg.sender,
                 roundId: roundId,
                 timeframe: _timeframe,
-                assetId: _assetId,
+                assetId: assetId,
+                leverage: _leverage,
                 betType: _betType,
                 currency: _currency,
                 claimed: false
             })
         );
-        pool.makeBet(_amount, potentialReward, msg.sender, _assetId);
+
+        pool.makeBetWithoutFee(_amount, potentialReward, msg.sender, assetId);
         notClaimed.push(bets.length - 1);
         emit NewBetAdded(
             msg.sender,
@@ -295,8 +312,7 @@ contract Borb is AutomationCompatibleInterface {
             _currency,
             _timeframe,
             _amount,
-            potentialReward,
-            _assetId,
+            _leverage,
             price,
             block.timestamp
         );
@@ -328,38 +344,71 @@ contract Borb is AutomationCompatibleInterface {
         closePrice = getClosePriceByRoundId(_betId, _knownRoundId);
         bets[_betId].claimed = true;
         address ref = referals[currentBet.user];
-        //if user win (user bet up and lockPrice<closePrice or user bet down and lockPrice>closePrice)
-        uint256 houseFee = (bets[_betId].amount * 100) / 10000;
-        if (
-            (currentBet.betType == BetType.Up &&
-                currentBet.lockPrice < closePrice) ||
+        uint256 potentialReward = getPotentialReward(
+            bets[_betId].currency,
+            bets[_betId].timeframe,
+            bets[_betId].amount
+        );
+        uint256 realReward = getRealReward(
+            bets[_betId].currency,
+            bets[_betId].timeframe,
+            bets[_betId].lockPrice,
+            closePrice,
+            bets[_betId].amount,
+            bets[_betId].leverage
+        );
+
+        bool isWin = (currentBet.betType == BetType.Up &&
+            currentBet.lockPrice < closePrice) ||
             (currentBet.betType == BetType.Down &&
-                currentBet.lockPrice > closePrice)
-        ) {
-            pool.transferReward(
-                _betId,
-                currentBet.potentialReward,
-                houseFee,
-                currentBet.user,
-                ref,
-                currentBet.assetId
-            );
+                currentBet.lockPrice > closePrice);
+
+        uint256 winFee = 0;
+        uint256 looseFee = 0;
+
+        if (isWin) {
+            winFee =
+                ((realReward - bets[_betId].amount) * winFeePercent) /
+                10000;
+            realReward -= winFee;
         } else {
-            pool.unlock(
-                _betId,
-                houseFee,
-                currentBet.potentialReward,
-                currentBet.user,
-                ref,
-                currentBet.assetId
-            );
+            realReward =
+                bets[_betId].amount -
+                (realReward - bets[_betId].amount);
+            looseFee =
+                ((bets[_betId].amount - realReward) * looseFeePercent) /
+                10000;
         }
+        pool.transferReward(
+            _betId,
+            realReward - winFee,
+            winFee,
+            currentBet.user,
+            ref,
+            currentBet.assetId
+        );
+
+        pool.unlock(
+            _betId,
+            looseFee,
+            potentialReward - realReward,
+            currentBet.user,
+            ref,
+            currentBet.assetId
+        );
         emit BetClaimed(
             currentBet.user,
             currentBet.timeframe,
             _betId,
-            closePrice
+            closePrice,
+            realReward,
+            isWin
         );
+    }
+
+    ///@notice allowing bets
+    function toggleAllowBetting() external onlyOwner {
+        isGameStopped = !isGameStopped;
     }
 
     ///@notice Call this function if you dont know roundID. Warning! it is not gas effecient
@@ -392,7 +441,6 @@ contract Borb is AutomationCompatibleInterface {
 
     ///@notice this function is calling only by backend when it needs to change reward percent
     function updateRewardPercent(
-        uint8 _assetId,
         Currency _currency,
         uint32 _timeframe,
         uint256 _newPercent
@@ -405,7 +453,7 @@ contract Borb is AutomationCompatibleInterface {
                 REWARD_PERCENT_MAX
             );
         }
-        rewardPercent[_currency][_assetId][_timeframe] = _newPercent;
+        rewardPercent[_currency][_timeframe] = _newPercent;
     }
 
     ///@notice Sets the max and min bet size
@@ -420,20 +468,45 @@ contract Borb is AutomationCompatibleInterface {
         minBetAmount = _newMin;
     }
 
-    ///@notice Called to find out the possible winnings, taking into account the commission, timeframe in seconds
-    ///@param _assetId id of bet asset
+    ///@notice Called to find out the real winnings
     ///@param _currency bet currency which must go Up or Down
     ///@param _timeframe bet timeframe in seconds
+    ///@param _openPrice open price
+    ///@param _closePrice close price
+    ///@param _amount amount in asset
+    ///@param _leverage leverage
+    ///@return reward real reward percent for this bet
+    function getRealReward(
+        Currency _currency,
+        uint32 _timeframe,
+        int256 _openPrice,
+        int256 _closePrice,
+        uint256 _amount,
+        uint8 _leverage
+    ) public view returns (uint256 reward) {
+        int256 diffMod = _closePrice > _openPrice
+            ? _closePrice - _openPrice
+            : _openPrice - _closePrice;
+        uint256 realPercent = (uint256((diffMod * 1_000_000) / _openPrice) *
+            100 *
+            _leverage);
+        if (realPercent > rewardPercent[_currency][_timeframe] * 1_000_000) {
+            realPercent = rewardPercent[_currency][_timeframe] * 1_000_000;
+        }
+        uint256 realReward = _amount + (_amount * realPercent) / 100_000_000;
+        return realReward;
+    }
+
+    ///@notice Called to find out the possible winnings
     ///@param _amount amount in asset
     ///@return reward potential reward for this bet
-    function getReward(
-        uint8 _assetId,
+    function getPotentialReward(
         Currency _currency,
         uint32 _timeframe,
         uint256 _amount
     ) public view returns (uint256 reward) {
         uint256 potentialReward = _amount +
-            (_amount * rewardPercent[_currency][_assetId][_timeframe] * 100) /
+            (_amount * 100 * rewardPercent[_currency][_timeframe]) /
             10000;
         return potentialReward;
     }
@@ -450,10 +523,10 @@ contract Borb is AutomationCompatibleInterface {
         return timeframes;
     }
 
-    ///@notice Gets allowed stablecoins
-    ///@return array of allowed stablecoins names
-    function getAllowedAssets() public view returns (string[] memory) {
-        return pool.getAllowedAssets();
+    ///@notice Gets name of using stablecoin
+    ///@return name
+    function getAsset() public view returns (string memory) {
+        return pool.getAssetName(assetId);
     }
 
     ///@notice gets asset(stablecoin) address by its name
@@ -562,7 +635,6 @@ contract Borb is AutomationCompatibleInterface {
         return true && !bets[_betId].claimed;
     }
 
-    ///@notice function for automatization claim
     function checkUpkeep(
         bytes calldata checkData
     )
@@ -583,7 +655,6 @@ contract Borb is AutomationCompatibleInterface {
         return (upkeepNeeded, performData);
     }
 
-    ///@notice function for automatization claim
     function performUpkeep(bytes calldata performData) external override {
         uint256 notclaimedId = abi.decode(performData, (uint256));
         claimWithoutRoundId(notClaimed[notclaimedId]);

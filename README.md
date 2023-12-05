@@ -24,4 +24,4 @@ We welcome contributions from the community. Please read our contributing guidel
 
 ---
 
-This README is a brief overview of borb.fi. For more detailed information, please visit our [documentation](link to documentation if available).
+This README is a brief overview of borb.fi. For more detailed information, please visit our [documentation](https://docs.borb.fi/).

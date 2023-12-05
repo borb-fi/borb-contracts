@@ -9,7 +9,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.
 ///@title LP Token
 contract RewardToken is ERC20, Ownable, ReentrancyGuard {
     using SafeERC20 for ERC20;
-    uint256 public constant PRICE_1_TO_1 = 1 * 10 ** 18;
+
+    uint256 private constant USDT_DECIMALS = 6;
+    uint256 public constant PRICE_1_TO_1 = 1 * 10 ** USDT_DECIMALS;
 
     ///@notice base asset
     ERC20 public immutable asset;

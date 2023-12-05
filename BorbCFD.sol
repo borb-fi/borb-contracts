@@ -5,14 +5,13 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/Ag
 import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 import {Pool} from "./Pool.sol";
 
-//import "../node_modules/hardhat/console.sol";
-
 ///@title Borb Game contract
 ///@notice A contract that allows you to bet stablecoins on an increase or decrease in the price of a selected currency and make a profit.
 contract BorbCFD is AutomationCompatibleInterface {
     uint256[] public notClaimed;
     uint256 public constant REWARD_PERCENT_MIN = 20;
     uint256 public constant REWARD_PERCENT_MAX = 100;
+    uint256 private constant USDT_DECIMALS = 6;
 
     enum BetType {
         Up,
@@ -20,16 +19,16 @@ contract BorbCFD is AutomationCompatibleInterface {
     }
 
     enum Currency {
-        BTC,
-        ETH,
-        SOL,
-        BNB,
-        ADA,
-        DOT,
-        MATIC,
-        DOGE,
-        ATOM,
-        AVAX
+        BTC, // Bitcoin
+        ETH, // Ethereum
+        SOL, // Solana
+        BNB, // Binance Coin
+        ADA, // Cardano
+        DOT, // Polkadot
+        MATIC, // Polygon
+        DOGE, // Dogecoin
+        LTC, // Litecoin
+        XRP // Ripple
     }
 
     struct Bet {
@@ -42,12 +41,12 @@ contract BorbCFD is AutomationCompatibleInterface {
         uint8 assetId;
         uint8 leverage;
         BetType betType;
-        Currency currency;
+        uint8 currency;
         bool claimed;
     }
 
     ///@notice oracle price contracts
-    mapping(Currency => AggregatorV3Interface) public priceFeeds;
+    mapping(uint8 => AggregatorV3Interface) public priceFeeds;
 
     ///@notice The pool manages the funds.
     Pool public pool;
@@ -73,23 +72,23 @@ contract BorbCFD is AutomationCompatibleInterface {
     mapping(address => bool) public users;
 
     ///@notice reward percents is different for different currencies, timeframes and assets
-    mapping(Currency => mapping(uint32 => uint256)) public rewardPercent;
+    mapping(uint8 => mapping(uint32 => uint256)) public rewardPercent;
 
     ///@notice assetId from pool, this currency is for bets
     uint8 public assetId;
 
     ///@notice allowed currencies
-    Currency[10] public currencies = [
-        Currency.BTC,
-        Currency.ETH,
-        Currency.SOL,
-        Currency.BNB,
-        Currency.ADA,
-        Currency.DOT,
-        Currency.MATIC,
-        Currency.DOGE,
-        Currency.ATOM,
-        Currency.AVAX
+    uint8[] public currencies = [
+        uint8(Currency.BTC),
+        uint8(Currency.ETH),
+        uint8(Currency.SOL),
+        uint8(Currency.BNB),
+        uint8(Currency.ADA),
+        uint8(Currency.DOT),
+        uint8(Currency.MATIC),
+        uint8(Currency.DOGE),
+        uint8(Currency.LTC),
+        uint8(Currency.XRP)
     ];
 
     ///@notice if game is stopped, then nobody can make bets
@@ -114,7 +113,7 @@ contract BorbCFD is AutomationCompatibleInterface {
         address indexed user,
         uint256 indexed betId,
         BetType betType,
-        Currency currency,
+        uint8 currency,
         uint32 timeframe,
         uint256 amount,
         uint8 leverage,
@@ -192,7 +191,7 @@ contract BorbCFD is AutomationCompatibleInterface {
     ) {
         owner = msg.sender;
 
-        for (uint256 currencyId = 0; currencyId < 10; currencyId++) {
+        for (uint8 currencyId = 0; currencyId < 10; currencyId++) {
             priceFeeds[currencies[currencyId]] = AggregatorV3Interface(
                 _priceFeeds[currencyId]
             );
@@ -200,15 +199,15 @@ contract BorbCFD is AutomationCompatibleInterface {
 
         calculator = _calculator;
         pool = Pool(_pool);
-        maxBetAmount = 100 * 10 ** 18;
-        minBetAmount = 10_000;
-        for (uint256 currencyId = 0; currencyId < 10; currencyId++) {
+        maxBetAmount = 1000 * 10 ** USDT_DECIMALS;
+        minBetAmount = 1 * 10 ** USDT_DECIMALS;
+        for (uint8 currencyId = 0; currencyId < 10; currencyId++) {
             _initRewardPercent(currencies[currencyId]);
         }
         assetId = pool.getAssetId(_assetName);
     }
 
-    function _initRewardPercent(Currency _currency) private {
+    function _initRewardPercent(uint8 _currency) private {
         uint32[] memory timeframes = getAllowedTimeframes();
         uint256 length = timeframes.length;
         for (uint8 i = 0; i < length; ) {
@@ -248,7 +247,7 @@ contract BorbCFD is AutomationCompatibleInterface {
         address _ref,
         uint32 _timeframe,
         BetType _betType,
-        Currency _currency,
+        uint8 _currency,
         uint8 _leverage
     ) external payable timeframeExsists(_timeframe) {
         if (isGameStopped) {
@@ -411,6 +410,13 @@ contract BorbCFD is AutomationCompatibleInterface {
         isGameStopped = !isGameStopped;
     }
 
+    ///@notice add currency
+    function addCurrency(address oracle) external onlyOwner {
+        priceFeeds[uint8(currencies.length)] = AggregatorV3Interface(oracle);
+        _initRewardPercent(uint8(currencies.length));
+        currencies.push(uint8(currencies.length));
+    }
+
     ///@notice Call this function if you dont know roundID. Warning! it is not gas effecient
     function claimWithoutRoundId(uint256 _betId) public {
         uint80 roundId = getCloseRoundId(_betId);
@@ -420,8 +426,8 @@ contract BorbCFD is AutomationCompatibleInterface {
     ///@notice sets price oracle
     ///@param _oracle price oracle address
     ///@param _currency currency which will take price from this oracle
-    function setOracle(address _oracle, Currency _currency) external onlyOwner {
-        if (_currency > Currency.AVAX) {
+    function setOracle(address _oracle, uint8 _currency) external onlyOwner {
+        if (uint256(_currency) > currencies.length) {
             revert IncorrectPriceFeedNumber();
         }
         priceFeeds[_currency] = AggregatorV3Interface(_oracle);
@@ -441,7 +447,7 @@ contract BorbCFD is AutomationCompatibleInterface {
 
     ///@notice this function is calling only by backend when it needs to change reward percent
     function updateRewardPercent(
-        Currency _currency,
+        uint8 _currency,
         uint32 _timeframe,
         uint256 _newPercent
     ) external onlyCalculator timeframeExsists(_timeframe) {
@@ -477,7 +483,7 @@ contract BorbCFD is AutomationCompatibleInterface {
     ///@param _leverage leverage
     ///@return reward real reward percent for this bet
     function getRealReward(
-        Currency _currency,
+        uint8 _currency,
         uint32 _timeframe,
         int256 _openPrice,
         int256 _closePrice,
@@ -501,7 +507,7 @@ contract BorbCFD is AutomationCompatibleInterface {
     ///@param _amount amount in asset
     ///@return reward potential reward for this bet
     function getPotentialReward(
-        Currency _currency,
+        uint8 _currency,
         uint32 _timeframe,
         uint256 _amount
     ) public view returns (uint256 reward) {
@@ -541,11 +547,8 @@ contract BorbCFD is AutomationCompatibleInterface {
     ///@param _currency currency number
     ///@return price oracle address for currency
     function getPriceFeed(
-        Currency _currency
+        uint8 _currency
     ) public view returns (AggregatorV3Interface) {
-        if (_currency > Currency.AVAX) {
-            revert IncorrectPriceFeedNumber();
-        }
         return priceFeeds[_currency];
     }
 

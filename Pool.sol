@@ -13,6 +13,7 @@ import {B} from "./B.sol";
 contract Pool is ReentrancyGuard, Ownable {
     using SafeERC20 for B;
 
+    uint256 private constant USDT_DECIMALS = 6;
     uint256 public constant MIN_USDT_PRICE = 100; //read as 1,00
     ///@notice the address whithc will receive fees
     address public house;
@@ -339,19 +340,19 @@ contract Pool is ReentrancyGuard, Ownable {
             emit ReferalRewardEarned(_betId, _to, _ref, refReward, _assetId);
         }
         //some % to trader
-        if (allBetsValue[_to] > 100_000 * 10 ** 18) {
+        if (allBetsValue[_to] > 100_000 * 10 ** USDT_DECIMALS) {
             uint256 percent = 1000; //10%
             if (
-                allBetsValue[_to] >= 1_000_000 * 10 ** 18 &&
-                allBetsValue[_to] < 10_000_000 * 10 ** 18
+                allBetsValue[_to] >= 1_000_000 * 10 ** USDT_DECIMALS &&
+                allBetsValue[_to] < 10_000_000 * 10 ** USDT_DECIMALS
             ) {
                 percent = 2000;
             } else if (
-                allBetsValue[_to] >= 10_000_000 * 10 ** 18 &&
-                allBetsValue[_to] < 100_000_000 * 10 ** 18
+                allBetsValue[_to] >= 10_000_000 * 10 ** USDT_DECIMALS &&
+                allBetsValue[_to] < 100_000_000 * 10 ** USDT_DECIMALS
             ) {
                 percent = 3000;
-            } else if (allBetsValue[_to] >= 100_000_000 * 10 ** 18) {
+            } else if (allBetsValue[_to] >= 100_000_000 * 10 ** USDT_DECIMALS) {
                 percent = 4000;
             }
 
@@ -465,11 +466,11 @@ contract Pool is ReentrancyGuard, Ownable {
         return allowedAssets[_assetId].balances[_addr];
     }
 
-    ///@notice Deposit funds to the pool account, you can deposit from one usdt or 1*10**18
+    ///@notice Deposit funds to the pool account, you can deposit from one usdt or 1*10**USDT_DECIMALS
     ///@param _assetId id of stablecoin asset
     ///@param _amount to deposit in stablecoins
     function makeDeposit(uint8 _assetId, uint256 _amount) external {
-        if (_amount < 1 * 10 ** 18) {
+        if (_amount < 1 * 10 ** USDT_DECIMALS) {
             revert MinimumAmountError();
         }
         if (tokenB.balanceOf(msg.sender) < _amount / rateB) {
@@ -537,7 +538,7 @@ contract Pool is ReentrancyGuard, Ownable {
     }
 
     ///@notice return false if poolrun is not possible
-    function isPoolRunPossible() external view returns(bool) {
+    function isPoolRunPossible() external view returns (bool) {
         for (uint8 i = 0; i < allowedAssetsCount; i++) {
             uint256 usdToWithdraw = allowedAssets[i]
                 .rewardToken

@@ -10,6 +10,8 @@ import {Pool} from "./Pool.sol";
 contract Borb is AutomationCompatibleInterface {
     uint256 public constant REWARD_PERCENT_MIN = 20;
     uint256 public constant REWARD_PERCENT_MAX = 80;
+    uint256 private constant USDT_DECIMALS = 6;
+
     uint256[] public notClaimed;
     enum BetType {
         Up,
@@ -17,16 +19,16 @@ contract Borb is AutomationCompatibleInterface {
     }
 
     enum Currency {
-        BTC,
-        ETH,
-        SOL,
-        BNB,
-        ADA,
-        DOT,
-        MATIC,
-        DOGE,
-        ATOM,
-        AVAX
+        BTC, // Bitcoin
+        ETH, // Ethereum
+        SOL, // Solana
+        BNB, // Binance Coin
+        ADA, // Cardano
+        DOT, // Polkadot
+        MATIC, // Polygon
+        DOGE, // Dogecoin
+        LTC, // Litecoin
+        XRP // Ripple
     }
 
     struct Bet {
@@ -39,12 +41,12 @@ contract Borb is AutomationCompatibleInterface {
         uint32 timeframe;
         uint8 assetId;
         BetType betType;
-        Currency currency;
+        uint8 currency;
         bool claimed;
     }
 
     ///@notice oracle price contracts
-    mapping(Currency => AggregatorV3Interface) public priceFeeds;
+    mapping(uint8 => AggregatorV3Interface) public priceFeeds;
 
     ///@notice The pool manages the funds.
     Pool public pool;
@@ -71,21 +73,21 @@ contract Borb is AutomationCompatibleInterface {
 
     ///@notice reward percents is different for different currencies, timeframes and assets
     ///currency-asset-timeframe-percent
-    mapping(Currency => mapping(uint8 => mapping(uint32 => uint256)))
+    mapping(uint8 => mapping(uint8 => mapping(uint32 => uint256)))
         public rewardPercent;
 
     ///@notice allowed currencies
-    Currency[10] public currencies = [
-        Currency.BTC,
-        Currency.ETH,
-        Currency.SOL,
-        Currency.BNB,
-        Currency.ADA,
-        Currency.DOT,
-        Currency.MATIC,
-        Currency.DOGE,
-        Currency.ATOM,
-        Currency.AVAX
+    uint8[] public currencies = [
+        uint8(Currency.BTC),
+        uint8(Currency.ETH),
+        uint8(Currency.SOL),
+        uint8(Currency.BNB),
+        uint8(Currency.ADA),
+        uint8(Currency.DOT),
+        uint8(Currency.MATIC),
+        uint8(Currency.DOGE),
+        uint8(Currency.LTC),
+        uint8(Currency.XRP)
     ];
 
     ///@notice if game is stopped, then nobody can make bets
@@ -111,7 +113,7 @@ contract Borb is AutomationCompatibleInterface {
         address indexed user,
         uint256 indexed betId,
         BetType betType,
-        Currency currency,
+        uint8 currency,
         uint32 timeframe,
         uint256 amount,
         uint256 potentialReward,
@@ -186,7 +188,7 @@ contract Borb is AutomationCompatibleInterface {
         owner = msg.sender;
         pool = Pool(_pool);
         uint256 allowedAssetsCount = pool.allowedAssetsCount();
-        for (uint256 currencyId = 0; currencyId < 10; currencyId++) {
+        for (uint8 currencyId = 0; currencyId < 10; currencyId++) {
             priceFeeds[currencies[currencyId]] = AggregatorV3Interface(
                 _priceFeeds[currencyId]
             );
@@ -199,12 +201,12 @@ contract Borb is AutomationCompatibleInterface {
         }
 
         calculator = _calculator;
-        maxBetAmount = 100 * 10 ** 18;
-        minBetAmount = 100;
+        maxBetAmount = 1000 * 10 ** USDT_DECIMALS;
+        minBetAmount = 1 * 10 ** USDT_DECIMALS;
     }
 
     ///@notice initialize refard percent
-    function _initRewardPercent(uint8 _assetId, Currency _currency) private {
+    function _initRewardPercent(uint8 _assetId, uint8 _currency) private {
         uint32[] memory timeframes = getAllowedTimeframes();
         uint256 length = timeframes.length;
         for (uint8 i = 0; i < length; ) {
@@ -215,6 +217,19 @@ contract Borb is AutomationCompatibleInterface {
                 ++i;
             }
         }
+    }
+
+    ///@notice add currency
+    function addCurrency(address oracle) external onlyOwner {
+        priceFeeds[uint8(currencies.length)] = AggregatorV3Interface(oracle);
+        uint256 allowedAssetsCount = pool.allowedAssetsCount();
+        for (uint8 i = 0; i < allowedAssetsCount; ) {
+            _initRewardPercent(i, uint8(currencies.length));
+            unchecked {
+                ++i;
+            }
+        }
+        currencies.push(uint8(currencies.length));
     }
 
     ///@notice allowing bets
@@ -235,7 +250,7 @@ contract Borb is AutomationCompatibleInterface {
         uint32 _timeframe,
         uint8 _assetId,
         BetType _betType,
-        Currency _currency
+        uint8 _currency
     ) external payable timeframeExsists(_timeframe) {
         if (isGameStopped) {
             revert BettingIsNotAllowedError();
@@ -371,8 +386,8 @@ contract Borb is AutomationCompatibleInterface {
     ///@notice sets price oracle
     ///@param _oracle price oracle address
     ///@param _currency currency which will take price from this oracle
-    function setOracle(address _oracle, Currency _currency) external onlyOwner {
-        if (_currency > Currency.AVAX) {
+    function setOracle(address _oracle, uint8 _currency) external onlyOwner {
+        if (uint256(_currency) > currencies.length) {
             revert IncorrectPriceFeedNumber();
         }
         priceFeeds[_currency] = AggregatorV3Interface(_oracle);
@@ -393,7 +408,7 @@ contract Borb is AutomationCompatibleInterface {
     ///@notice this function is calling only by backend when it needs to change reward percent
     function updateRewardPercent(
         uint8 _assetId,
-        Currency _currency,
+        uint8 _currency,
         uint32 _timeframe,
         uint256 _newPercent
     ) external onlyCalculator timeframeExsists(_timeframe) {
@@ -428,7 +443,7 @@ contract Borb is AutomationCompatibleInterface {
     ///@return reward potential reward for this bet
     function getReward(
         uint8 _assetId,
-        Currency _currency,
+        uint8 _currency,
         uint32 _timeframe,
         uint256 _amount
     ) public view returns (uint256 reward) {
@@ -468,11 +483,8 @@ contract Borb is AutomationCompatibleInterface {
     ///@param _currency currency number
     ///@return price oracle address for currency
     function getPriceFeed(
-        Currency _currency
+        uint8 _currency
     ) public view returns (AggregatorV3Interface) {
-        if (_currency > Currency.AVAX) {
-            revert IncorrectPriceFeedNumber();
-        }
         return priceFeeds[_currency];
     }
 
